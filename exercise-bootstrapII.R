@@ -5,11 +5,12 @@
 
 xx <- c(0.55, 0.45, 0.10, 0.15, 0.80, 0.65, 0.38, 0.63, 0.10, 0.03)
 
+z <- c(0.11, 0.33, 0.58. 0.3, 0.9, 0.98)
 ### CHECK MLE for TAU !!!! 
 
 psi_ml <- function(x) - length(x)/sum(log(1- x))
 round(psi_ml(xx),2)
-
+round(psi_ml(z),2)
 
 tau_ml <- function(x) 1/(1+psi_ml(x))
 round(tau_ml(xx),2)

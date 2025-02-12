@@ -1,5 +1,6 @@
 ##Consider μb0, that is the estimator obtained by setting k = 0, and the sample mean X -n 
 
+
 #In R, plot their mse’s as functions of the parameter μ: does X ̄n  uniformly dominate μb0?
 
 # Definiamo le funzioni di rischio (MSE)

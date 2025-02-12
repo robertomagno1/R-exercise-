@@ -3,6 +3,8 @@
 
 # Data
 xx <- c(0.65, 0.48, 0.08, 0.11, 0.80, 0.67, 0.38, 0.63, 0.10, 0.03)
+
+
 # MLE for psi
 
 ml_psi <- function(x) -length(x)/sum(log(1- x))

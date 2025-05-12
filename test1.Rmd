@@ -1,0 +1,213 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+---
+
+title: "Mood Prediction with Kernel Ridge Regression and Conformal Inference"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+html\_document:
+toc: true
+toc\_depth: 3
+theme: united
+-------------
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 7,
+  fig.height = 5
+)
+library(caret)
+library(dplyr)
+library(ggplot2)
+```
+
+# Introduction
+
+This analysis builds a **Kernel Ridge Regression** (KRR) model in an RKHS with an RBF kernel to predict individuals' mood (`Happiness`) based on questionnaire responses. We then wrap the predictions in **distribution-free conformal intervals** for valid uncertainty quantification, evaluate on a held-out test set, and compute **marginal effects** to understand feature sensitivities.
+
+# 1. Data Loading & Preprocessing
+
+```{r data-loading}
+# Load data
+data_path <- "/Users/roberto/Desktop/UNI_DATASCIENCE/Stat_learning/final_project/risposte_umore.csv"
+df <- read.csv(data_path, stringsAsFactors = FALSE)
+# Rename columns
+colnames(df) <- c("Timestamp","Energy","SleepQuality","Hunger",
+                  "PhysicalActivity","StatsLiking","Informed",
+                  "BogosBinted","Anger","Fear","Happiness",
+                  "Sadness","Surprise","Disgust")
+
+# Simplify PhysicalActivity into factor
+df <- df %>% mutate(
+  PhysAct = case_when(
+    grepl("No", PhysicalActivity, ignore.case=TRUE) ~ "No",
+    grepl("leggera", PhysicalActivity, ignore.case=TRUE) ~ "Low",
+    grepl("intensa", PhysicalActivity, ignore.case=TRUE) ~ "High",
+    TRUE ~ "No"
+  ),
+  PhysAct = factor(PhysAct, levels=c("No","Low","High"))
+) %>% select(-PhysicalActivity)
+```
+
+# 2. Train/Calibration/Test Split
+
+```{r split-data}
+set.seed(2025)
+n <- nrow(df)
+i_tr <- sample(n, size = 0.6*n)
+rest <- setdiff(seq_len(n), i_tr)
+i_ca <- sample(rest, size = 0.5*length(rest))
+i_te <- setdiff(rest, i_ca)
+
+features <- df %>% select(Energy, SleepQuality, Hunger,
+                          StatsLiking, Informed, BogosBinted, PhysAct)
+y_all <- df$Happiness
+
+X_tr_raw <- features[i_tr,]; y_tr <- y_all[i_tr]
+X_ca_raw <- features[i_ca,]; y_ca <- y_all[i_ca]
+X_te_raw <- features[i_te,]; y_te <- y_all[i_te]
+```
+
+# 3. Encoding & Scaling
+
+```{r preprocess}
+dumm <- caret::dummyVars(~ ., data = X_tr_raw)
+X_tr_n <- predict(dumm, X_tr_raw)
+X_ca_n <- predict(dumm, X_ca_raw)
+X_te_n <- predict(dumm, X_te_raw)
+
+pp <- preProcess(X_tr_n, method = c("center","scale"))
+X_tr <- predict(pp, X_tr_n)
+X_ca <- predict(pp, X_ca_n)
+X_te <- predict(pp, X_te_n)
+
+# Convert to matrices
+X_tr_mat <- as.matrix(X_tr)
+X_ca_mat <- as.matrix(X_ca)
+X_te_mat <- as.matrix(X_te)
+```
+
+# 4. Kernel Ridge Regression (KRR)
+
+We implement KRR with an RBF kernel, selecting hyperparameters by grid-search on the calibration set.
+
+```{r krr-grid}
+# Define RBF kernel function
+ingama <- function(X, Y, sigma) {
+  X2 <- rowSums(X^2)
+  Y2 <- rowSums(Y^2)
+  D2 <- outer(X2, Y2, "+") - 2 * (X %*% t(Y))
+  exp(-D2 / (2 * sigma^2))
+}
+# Heuristic sigma: median distance
+dists <- as.vector(dist(X_tr_mat))
+sigma0 <- median(dists)
+
+sigmas <- sigma0 * c(0.5,1,2)
+lambdas <- 10^seq(-3,1,length=5)
+best <- list(mse=Inf)
+for(s in sigmas){
+  K_tr <- ingama(X_tr_mat, X_tr_mat, s)
+  for(lambda in lambdas){
+    A <- K_tr + lambda * diag(nrow(K_tr))
+    alpha_hat <- solve(A, y_tr)
+    pred_ca <- ingama(X_ca_mat, X_tr_mat, s) %*% alpha_hat
+    mse_ca <- mean((pred_ca - y_ca)^2)
+    if(mse_ca < best$mse) best <- list(s=s, l=lambda, a=alpha_hat)
+  }
+}
+sigma_hat <- best$s; lambda_hat <- best$l; alpha_hat <- best$a
+```
+
+# 5. Conformal Prediction Intervals
+
+```{r conformal}
+alpha <- 0.1
+pred_ca <- ingama(X_ca_mat, X_tr_mat, sigma_hat) %*% alpha_hat
+nc <- abs(y_ca - pred_ca)
+qlev <- (1-alpha)*(1+1/length(nc))
+q_hat <- quantile(nc, probs=qlev, type=1)
+
+predict_krr <- function(Xnew){
+  mu <- ingama(as.matrix(Xnew), X_tr_mat, sigma_hat) %*% alpha_hat
+  df <- data.frame(pred = as.numeric(mu))
+  df$lo <- df$pred - q_hat
+  df$hi <- df$pred + q_hat
+  df
+}
+```
+
+# 6. Evaluation on Test Set
+
+```{r evaluate-test}
+res_test <- predict_krr(X_te)
+mse_test <- mean((res_test$pred - y_te)^2)
+cov_test <- mean(y_te >= res_test$lo & y_te <= res_test$hi)
+width_test <- mean(res_test$hi - res_test$lo)
+
+cat(sprintf("Test MSE = %.3f\n", mse_test))
+cat(sprintf("Coverage (90%%) = %.1f%%\n", 100*cov_test))
+cat(sprintf("Average Width = %.3f\n", width_test))
+```
+
+# 7. Results Visualization
+
+```{r plot-results, fig.width=7, fig.height=5}
+ggplot(cbind(res_test, True=y_te), aes(x=pred,y=True)) +
+  geom_point(alpha=0.6) +
+  geom_errorbar(aes(ymin=lo,ymax=hi), alpha=0.3) +
+  labs(title="KRR + 90% Conformal Intervals",
+       subtitle=sprintf("MSE=%.3f | Cov=%.1f%% | Width=%.2f",
+                        mse_test,100*cov_test,width_test),
+       x="Predicted", y="True") +
+  theme_minimal()
+```
+
+# 8. BogosBinted Shuffle Test
+
+```{r shuffle-test}
+shuf <- features; shuf$BogosBinted <- sample(shuf$BogosBinted)
+Xsh_tr <- predict(pp, predict(dumm, shuf[i_tr,]))
+Xsh_te <- predict(pp, predict(dumm, shuf[i_te,]))
+A_sh   <- ingama(Xsh_tr, Xsh_tr, sigma_hat) + lambda_hat*diag(nrow(Xsh_tr))
+alpha_sh <- solve(A_sh, y_tr)
+pred_sh <- ingama(Xsh_te, Xsh_tr, sigma_hat) %*% alpha_sh
+mse_shuf <- mean((pred_sh - y_te)^2)
+cat(sprintf("Shuffle MSE = %.3f\n", mse_shuf))
+```
+
+# 9. Marginal Effects
+
+```{r marginal-effects}
+step <- 1e-3; n_tr <- nrow(X_tr_mat); p <- ncol(X_tr_mat)
+meffs <- matrix(0,n_tr,p)
+K_tr <- ingama(X_tr_mat, X_tr_mat, sigma_hat)
+for(j in 1:n_tr){
+  diff <- sweep(X_tr_mat,2,X_tr_mat[j,],"-")
+  meffs[j,] <- colSums(alpha_hat * K_tr[,j] * (-diff)) / sigma_hat^2
+}
+avg_me <- colMeans(meffs)
+quart_me <- apply(meffs,2,quantile,c(.25,.5,.75))
+print(round(avg_me,8))
+print(round(quart_me,8))
+```
+
+# Conclusion
+
+This RMarkdown document implemented a custom **Kernel Ridge Regression** model with
+an RBF kernel, built conformal intervals for robust uncertainty quantification,
+and derived marginal effects to interpret feature contributions.
+
+Further improvements could include:
+
+* Adding cross-validated selection of the conformal miscoverage level  α.
+* Extending to **multi-dimensional** intervals for joint prediction.
+* Incorporating **time-stamped** features if longitudinal data available.
+
